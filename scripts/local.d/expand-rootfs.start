@@ -1,0 +1,88 @@
+#!/bin/sh
+# expand-rootfs.start - 开机自动扩容 rootfs（压缩镜像 -> 满分区）
+#
+# 背景:
+#   - 所有镜像都收缩到 ~200MB (resize2fs -M)，快刷
+#   - 分区实际大小 ~3.47GB (mmcblk0p14)
+#   - 开机自动扩容到分区大小，免手动跑 sp970-expand-rootfs
+#
+# 依赖:
+#   - /usr/sbin/resize2fs (e2fsprogs-extra)
+#   - /usr/sbin/tune2fs (e2fsprogs-extra)
+#
+# 日志:
+#   - /var/log/expand-rootfs.log
+#
+# 条件:
+#   - 仅当 CUR_SIZE < PART_SIZE*95% 时执行（避免重复扩容）
+#   - 扩容失败不阻塞开机
+#
+# 注意:
+#   - 不用 df 使用率判断——压缩镜像 Use% ~95% 会被 90% 阈值误拦，永远不扩容
+#   - busybox 无 findmnt，改用 /proc/mounts 解析
+
+# 确保 /usr/sbin 在 PATH 中
+export PATH=/usr/sbin:/usr/bin:/bin:$PATH
+
+LOG="/var/log/expand-rootfs.log"
+
+# 检查 resize2fs
+if [ ! -x /usr/sbin/resize2fs ]; then
+    echo "$(date): resize2fs not found, skipping" >> "$LOG"
+    exit 0
+fi
+
+# 获取 rootfs 设备（busybox 无 findmnt，改用 /proc/mounts 解析）
+ROOTFS=""
+if [ -r /proc/mounts ]; then
+    ROOTFS=$(awk '$2=="/" {print $1; exit}' /proc/mounts 2>/dev/null || true)
+fi
+[ -z "$ROOTFS" ] && ROOTFS="/dev/root"
+ACTUAL_DEV=$(readlink -f "$ROOTFS" 2>/dev/null || echo "$ROOTFS")
+
+# 获取分区大小
+PART_SIZE=""
+if command -v blockdev >/dev/null 2>&1; then
+    PART_SIZE=$(blockdev --getsize64 "$ACTUAL_DEV" 2>/dev/null || true)
+fi
+
+if [ -z "$PART_SIZE" ]; then
+    # /proc/partitions: major minor #blocks name (#blocks 是 1024 进制)
+    DEV_NAME=$(basename "$ACTUAL_DEV")
+    PART_BLOCKS=$(awk -v d="$DEV_NAME" '$4==d {print $3}' /proc/partitions 2>/dev/null || true)
+    if [ -n "$PART_BLOCKS" ]; then
+        PART_SIZE=$((PART_BLOCKS * 1024))
+    fi
+fi
+
+if [ -z "$PART_SIZE" ]; then
+    echo "$(date): cannot get partition size, skipping" >> "$LOG"
+    exit 0
+fi
+
+# 获取当前文件系统大小
+CUR_BLOCKS=$(/usr/sbin/tune2fs -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block count" | awk '{print $3}')
+BLOCK_SIZE=$(/usr/sbin/tune2fs -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block size" | awk '{print $3}')
+
+if [ -z "$CUR_BLOCKS" ] || [ -z "$BLOCK_SIZE" ]; then
+    echo "$(date): cannot get filesystem size, skipping" >> "$LOG"
+    exit 0
+fi
+
+CUR_SIZE=$((CUR_BLOCKS * BLOCK_SIZE))
+
+# 检查是否需要扩容（当前大小 < 分区大小 * 95%）
+THRESHOLD=$((PART_SIZE * 95 / 100))
+if [ "$CUR_SIZE" -ge "$THRESHOLD" ]; then
+    # 已经接近分区大小，跳过
+    exit 0
+fi
+
+# 执行扩容
+echo "$(date): expanding rootfs from $(awk -v b="$CUR_SIZE" 'BEGIN{printf "%.0fMB", b/1048576}') to $(awk -v b="$PART_SIZE" 'BEGIN{printf "%.0fMB", b/1048576}')" >> "$LOG"
+
+if /usr/sbin/resize2fs "$ACTUAL_DEV" 2>>"$LOG"; then
+    echo "$(date): expand SUCCESS" >> "$LOG"
+else
+    echo "$(date): expand FAILED" >> "$LOG"
+fi

@@ -1,0 +1,93 @@
+#!/bin/sh
+# SP970 sim-activate.start — 开机自动 SIM 激活 + 联网 (方案 B)
+#
+# Layer 1: 系统服务 (OpenRC local.d)
+# 依赖: Layer 0 (DTB sim-sel gpio114 + modem 固件)
+# 产出: SIM activated + MM started → MM+NM 自动建承载/配 IP
+#
+# N958St modem UIM Get Slot Status NotSupported → MM 开机误判 sim-missing + power-off。
+# 本脚本绕开: 先 qmicli 激活 SIM (AID 自动发现, 通用), 再起 MM。
+# MM 不在 boot runlevel + D-Bus 激活禁 (alpine_rootfs.sh 配), 由本脚本一次性 rc-service start。
+LOG=/var/log/sim-activate.log
+echo "[$(date)] === sim-activate start ===" >> $LOG
+QMI_BIN="$(command -v qmicli || echo /tmp/qmicli)"
+if [ "$(id -u)" = "0" ]; then QMI="$QMI_BIN"; else QMI="sudo -n $QMI_BIN"; fi
+
+# 1. udev settle + wait for QMI control port
+udevadm trigger 2>/dev/null
+udevadm settle 2>/dev/null
+i=0
+while [ ! -e /dev/wwan0qmi0 ] && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+if [ -e /dev/wwan0qmi0 ]; then
+    echo "[$(date)] QMI port ready (waited ${i}s)" >> $LOG
+else
+    echo "[$(date)] FAIL: no QMI port after 60s" >> $LOG
+    exit 1
+fi
+
+# 2. discover USIM AID from card (retry up to 90s while USIM initializes at boot)
+# NOTE: busybox awk breaks on `{f=1;next}`; use plain `/usim/{f=1}` flag instead.
+i=0
+while [ $i -lt 18 ]; do
+    AID=$($QMI -d /dev/wwan0qmi0 --uim-get-card-status 2>/dev/null | \
+          awk '/usim/{f=1} f&&/Application ID:/{getline; gsub(/[^0-9A-Fa-f]/,""); print; exit}')
+    [ -n "$AID" ] && break
+    sleep 5; i=$((i+1))
+done
+if [ -n "$AID" ]; then
+    echo "[$(date)] AID=$AID (after ${i} tries)" >> $LOG
+else
+    echo "[$(date)] FAIL: USIM AID discovery failed (90s)" >> $LOG
+    exit 1
+fi
+
+# 3. provision until USIM ready (up to 5 passes)
+for i in 1 2 3 4 5; do
+    $QMI -d /dev/wwan0qmi0 \
+      --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=1,aid=$AID" \
+      >/dev/null 2>&1
+    sleep 5
+    READY=$($QMI -d /dev/wwan0qmi0 --uim-get-card-status 2>/dev/null | grep -c "Application state: 'ready'")
+    [ "$READY" -ge 1 ] && break
+done
+echo "[$(date)] provision done, USIM ready on pass $i" >> $LOG
+
+# 4. enable RF
+printf 'AT+CFUN=1\r' | timeout 8 microcom -t 6000 /dev/wwan0at0 >/dev/null 2>&1
+echo "[$(date)] CFUN=1 sent" >> $LOG
+sleep 5
+
+# 5. push registration (repeat provision once)
+$QMI -d /dev/wwan0qmi0 \
+  --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=1,aid=$AID" \
+  >/dev/null 2>&1
+
+# 6. wait for network registration (max ~60s)
+i=0
+while [ $i -lt 12 ]; do
+    REG=$($QMI -d /dev/wwan0qmi0 --nas-get-serving-system 2>/dev/null | grep -c "Registration state: 'registered'")
+    [ "$REG" -ge 1 ] && break
+    sleep 5; i=$((i+1))
+done
+echo "[$(date)] registration wait done (${i} iters, reg=${REG:-0})" >> $LOG
+
+# 7. start MM once -> wait until a modem is actually visible, log real errors.
+echo "[$(date)] mm-start: rc-service modemmanager start" >> $LOG
+MM_OUT=$(rc-service modemmanager start 2>&1)
+echo "[$(date)] mm-start rc-service: $(echo "$MM_OUT" | tr '\n' ' ')" >> $LOG
+i=0
+while [ $i -lt 12 ]; do
+    if mmcli -L 2>/dev/null | grep -q "ModemManager1/Modem"; then
+        echo "[$(date)] === sim-activate end (modem via mmcli, poll ${i}) ===" >> $LOG
+        break
+    fi
+    sleep 5; i=$((i+1))
+done
+if ! mmcli -L 2>/dev/null | grep -q "ModemManager1/Modem"; then
+    echo "[$(date)] WARN: no modem via mmcli after 60s" >> $LOG
+    if pgrep -f "usr/sbin/ModemManager" >/dev/null 2>&1; then
+        echo "[$(date)]   MM process present but no modem; mmcli -L: $(mmcli -L 2>&1 | tr '\n' ' ')" >> $LOG
+    else
+        echo "[$(date)]   MM process absent" >> $LOG
+    fi
+fi
