@@ -3,16 +3,16 @@
 # Usage: sp970-link {card|status [--ping]|detail|netcheck|up [--check]}
 # Output: one-line JSON (machine-readable), except detail (pretty text).
 #
-# v2 优化 (2026-08-30, 第一性原理复盘后):
-#   P2  card 四态: present-ready / present-detected / absent / unknown
-#       unknown = 查询失败(QMI 通道挂死等), 与 "modem 确认无卡" 区分,
-#       不再把"没查到"谎报成 absent (避免误导恢复动作)。
-#   P1  status 与外网 ping 解耦: link_state 只反映 modem 事实;
-#       ping 字段默认 na, status --ping 才探测; 外网连通性归 netcheck。
-#   P3  link 六态: up / activating / no-card / card-no-net / net-down / unknown
-#       activating 表达 MM 过渡期 (注册/使能/冷启动 ~40s 窗口 坑#8)。
-#   P6  BDMUX 路径动态查找, 不硬编码 4080000 (坑#1 remoteproc 编号动态)。
-#   P5  up --check 只读预检, 报告卡/链路/计划动作, 不动系统。
+# 设计:
+#   - card 四态: present-ready / present-detected / absent / unknown
+#     unknown = 查询失败(QMI 通道挂死/未就绪), 与 "modem 确认无卡"(absent) 区分,
+#     避免把"没查到"当作"确认无卡" (误导恢复动作)。
+#   - status 与外网 ping 解耦: link_state 只反映 modem 事实;
+#     ping 字段默认 na, status --ping 才探测; 外网连通性归 netcheck。
+#   - link 六态: up / activating / no-card / card-no-net / net-down / unknown
+#     activating 表达 MM 过渡期 (注册/使能/冷启动 ~40s 窗口 坑#8)。
+#   - BDMUX 路径动态查找, 不硬编码 (坑#1 remoteproc 编号动态)。
+#   - up --check 只读预检, 报告卡/链路/计划动作, 不动系统。
 #
 # Stable parsing (已按实测格式校准):
 #   - mmcli -m any -K   : "key : value" 无 ANSI; 用 sed 取 modem.generic.state 等
