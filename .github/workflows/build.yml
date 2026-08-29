@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [dev]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Show submodule versions (fixed)
+        run: |
+          echo "=== Submodule versions ==="
+          git submodule status
+          echo ""
+          git -C src/lk2nd log -1 --format='lk2nd:    %h %ad | %s' --date=format:'%Y-%m-%d'
+          git -C src/qtestsign log -1 --format='qtestsign: %h %ad | %s' --date=format:'%Y-%m-%d'
+          git -C src/qhypstub log -1 --format='qhypstub:  %h %ad | %s' --date=format:'%Y-%m-%d'
+
+      - name: Install dependencies
+        run: sudo sh -e scripts/install_deps.sh
+
+      - name: Build hyp and aboot firmware
+        run: sudo sh -e scripts/build_hyp_aboot.sh
+
+      - name: Extract MSM8916 firmware
+        run: sudo sh -e scripts/extract_fw.sh
+
+      - name: Create rootfs
+        run: sudo sh -e scripts/alpine_rootfs.sh
+
+      - name: Create images
+        run: sudo sh -e scripts/build_images.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openstick-alpine
+          path: files/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: openstick-alpine
+          path: files/
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: files/*
+          generate_release_notes: true

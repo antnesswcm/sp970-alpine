@@ -1,0 +1,40 @@
+# ============================================================
+# sp970-alpine .gitignore
+#
+# ⚠️ 固件 blob (firmware/modem/sp970/ + firmware/sp970/) 必须提交!
+#    - modem 固件: mba.mbn + modem.bXX + modem.mdt + modem.mbn
+#    - WCNSS 固件: WCNSS.BXX + WCNSS.MDT + WCNSS_qcom_wlan_nv.bin
+#    - 设备树: dtbs/*.dtb
+#    这些是构建自包含的前提, 不能忽略。
+# ============================================================
+
+# ---- 构建产物 (CI/本地构建生成, 不进 git) ----
+*.raw
+*.zip
+*.tgz
+build/
+dist/
+files/
+mnt/
+rootfs/
+# apk.static (committed local copy)
+alpine_rootfs.tgz
+
+# ---- 编译/构建中间产物 ----
+*.o
+*.a
+*.log
+
+# ---- Python ----
+__pycache__/
+*.pyc
+
+# ---- 操作系统 ----
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ---- 本地临时文件 (重建/修复子模块时的中间产物, 不入仓) ----
+.del-tmp-*
+.del-*
+

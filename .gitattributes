@@ -1,0 +1,65 @@
+# 强制 LF (避免 CRLF 导致 busybox sh 解析异常)
+*.sh text eol=lf
+*.start text eol=lf
+*.dts text eol=lf
+*.dtsi text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.nmconnection text eol=lf
+*.conf text eol=lf
+*.scheme text eol=lf
+VERSION text eol=lf
+CHANGELOG.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# 无扩展名的设备端脚本 (busybox sh 解析，必须 LF)
+scripts/sp970-expand-rootfs text eol=lf
+scripts/sp970-link text eol=lf
+LICENSE text eol=lf
+
+# 二进制 (不转换, 绝对不碰)
+*.mbn binary
+*.bin binary
+*.dtb binary
+*.img binary
+*.apk binary
+*.jar binary
+*.pem binary
+*.p12 binary
+*.pk8 binary
+*.dll binary
+*.exe binary
+*.mdt binary
+*.b0 binary
+*.b1 binary
+*.b2 binary
+*.b3 binary
+*.b4 binary
+*.b5 binary
+*.b6 binary
+*.b7 binary
+*.b10 binary
+*.b11 binary
+*.b12 binary
+*.b13 binary
+*.b15 binary
+*.b16 binary
+*.b17 binary
+*.b18 binary
+*.b19 binary
+*.b20 binary
+*.b21 binary
+*.b24 binary
+*.b25 binary
+*.b26 binary
+*.b27 binary
+*.B00 binary
+*.B01 binary
+*.B02 binary
+*.B04 binary
+*.B06 binary
+*.B09 binary
+*.B10 binary
+*.B11 binary

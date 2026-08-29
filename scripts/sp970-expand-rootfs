@@ -1,0 +1,197 @@
+#!/bin/sh
+# sp970-expand-rootfs - 在线扩容 rootfs 到分区大小
+#
+# 用法:
+#   sp970-expand-rootfs             交互式确认
+#   sp970-expand-rootfs -y          跳过确认直接扩容
+#   sp970-expand-rootfs --check     仅检查，不扩容
+#
+# 选项:
+#   -y, --yes, --force, -f   跳过确认提示 (auto yes)
+#       --check, -c          仅检查显示状态，不执行扩容
+#   -h, --help               显示用法
+#
+# 行为:
+#   - 开头/结尾都打印 df -h 全景，扩容前后一目了然
+#   - 已扩容时自动跳过 resize2fs（阈值 95%，不白跑）
+#   - 扩容后用 tune2fs 复核新 Block count
+#
+# 依赖:
+#   - e2fsprogs-extra (resize2fs / tune2fs)
+#
+# 注意:
+#   - /proc/partitions 的 #blocks 是 1024 进制（非 512）
+#   - busybox 无 findmnt，改用 /proc/mounts 解析
+
+set -u
+
+# /usr/sbin 不一定在默认 PATH (busybox)
+export PATH=/usr/sbin:/usr/bin:/bin:/sbin:$PATH
+
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+usage() {
+    echo "用法: sp970-expand-rootfs [-y|--check]"
+    echo "  -y, --yes, --force, -f   跳过确认提示"
+    echo "      --check, -c          仅检查，不执行扩容"
+    echo "  -h, --help               显示用法"
+}
+
+# --- 参数解析 ---
+CHECK_ONLY=0
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes|--force|-f) FORCE=1 ;;
+        --check|-c)          CHECK_ONLY=1 ;;
+        -h|--help)           usage; exit 0 ;;
+        *) echo "未知参数: $arg" >&2; usage; exit 1 ;;
+    esac
+done
+
+# --- 工具函数 ---
+
+# 人类可读字节数 (awk 实现，避免 bc 依赖)
+fmt() {
+    awk -v b="$1" 'BEGIN {
+        split("B KB MB GB TB", u, " ");
+        i = 1; v = b;
+        while (v >= 1024 && i < 5) { v = v / 1024; i++; }
+        if (v >= 100)      printf "%.0f %s", v, u[i];
+        else if (v >= 10)  printf "%.1f %s", v, u[i];
+        else               printf "%.2f %s", v, u[i];
+    }'
+}
+
+# df -h 全景 (扩容前后各打印一次，比脚本自己截取一行直观)
+show_df() {
+    echo ""
+    echo "${CYAN}[df -h 全景]${NC}"
+    df -h / 2>/dev/null || echo "  (无法获取 df 信息)"
+}
+
+die() {
+    echo -e "${RED}错误：$1${NC}" >&2
+    exit 1
+}
+
+# --- 主体 ---
+echo "=== SP970 Rootfs 扩容工具 ==="
+
+# 1. root 权限
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${YELLOW}警告：需要 root 权限（使用 sudo 运行）${NC}" >&2
+    exit 1
+fi
+
+# 2. 检查 resize2fs / tune2fs
+RESIZE2FS=""
+for p in /usr/sbin/resize2fs /sbin/resize2fs; do
+    [ -x "$p" ] && RESIZE2FS="$p" && break
+done
+[ -z "$RESIZE2FS" ] && RESIZE2FS=$(command -v resize2fs 2>/dev/null || true)
+[ -z "$RESIZE2FS" ] && die "resize2fs 未安装 (apk add e2fsprogs-extra)"
+
+TUNE2FS=""
+for p in /usr/sbin/tune2fs /sbin/tune2fs; do
+    [ -x "$p" ] && TUNE2FS="$p" && break
+done
+[ -z "$TUNE2FS" ] && TUNE2FS=$(command -v tune2fs 2>/dev/null || true)
+[ -z "$TUNE2FS" ] && die "tune2fs 未安装 (apk add e2fsprogs-extra)"
+
+# 3. 获取 rootfs 块设备 (busybox 无 findmnt，改用 /proc/mounts)
+ROOTFS=""
+[ -r /proc/mounts ] && ROOTFS=$(awk '$2=="/" {print $1; exit}' /proc/mounts 2>/dev/null || true)
+[ -z "$ROOTFS" ] && ROOTFS="/dev/root"
+ACTUAL_DEV=$(readlink -f "$ROOTFS" 2>/dev/null || echo "$ROOTFS")
+
+# 4. 分区大小 (blockdev 优先，/proc/partitions 兜底)
+PART_SIZE=""
+if command -v blockdev >/dev/null 2>&1; then
+    PART_SIZE=$(blockdev --getsize64 "$ACTUAL_DEV" 2>/dev/null || true)
+fi
+if [ -z "$PART_SIZE" ]; then
+    # /proc/partitions: major minor #blocks name (#blocks 是 1024 进制)
+    DEV_NAME=$(basename "$ACTUAL_DEV")
+    PART_BLOCKS=$(awk -v d="$DEV_NAME" '$4==d {print $3}' /proc/partitions 2>/dev/null || true)
+    [ -n "$PART_BLOCKS" ] && PART_SIZE=$((PART_BLOCKS * 1024))
+fi
+[ -z "$PART_SIZE" ] && die "无法获取分区大小"
+
+# 5. 当前文件系统大小
+CUR_BLOCKS=$($TUNE2FS -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block count" | awk '{print $3}')
+BLOCK_SIZE=$($TUNE2FS -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block size" | awk '{print $3}')
+[ -z "$BLOCK_SIZE" ] && BLOCK_SIZE=4096
+[ -z "$CUR_BLOCKS" ] && die "无法获取文件系统大小"
+
+CUR_SIZE=$((CUR_BLOCKS * BLOCK_SIZE))
+FREE_SIZE=$((PART_SIZE - CUR_SIZE))
+[ "$FREE_SIZE" -lt 0 ] && FREE_SIZE=0
+
+# 6. 已扩容判断 (阈值 95%)
+THRESHOLD=$((PART_SIZE * 95 / 100))
+ALREADY=0
+[ "$CUR_SIZE" -ge "$THRESHOLD" ] && ALREADY=1
+
+# 7. 输出：df 全景 + rootfs 信息 + 扩容计划
+show_df
+
+echo ""
+echo "${CYAN}[rootfs]${NC} $ROOTFS -> $ACTUAL_DEV"
+echo ""
+echo "${CYAN}[扩容计划]${NC}"
+echo "  分区大小:   $(fmt "$PART_SIZE")"
+echo "  当前 fs:    $(fmt "$CUR_SIZE")"
+echo "  可扩容:     $(fmt "$FREE_SIZE")"
+echo "  resize2fs:  $RESIZE2FS"
+
+# 8. 已扩容 -> 跳过 resize2fs
+if [ "$ALREADY" -eq 1 ]; then
+    echo ""
+    echo -e "${GREEN}[已扩容] rootfs 已扩展到分区大小（当前 $CUR_SIZE >= 阈值 $THRESHOLD，95%），无需运行 resize2fs${NC}"
+    exit 0
+fi
+
+# 9. --check 仅检查
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    echo ""
+    echo -e "${YELLOW}[check] 仅检查模式，未执行扩容。需要扩容请去掉 --check 或加 -y${NC}"
+    exit 0
+fi
+
+# 10. 确认
+if [ "$FORCE" -ne 1 ]; then
+    printf "是否继续扩容？ [y/N] "
+    if ! read -r ans; then
+        echo ""
+        echo "已取消（无输入）"
+        exit 1
+    fi
+    case "$ans" in
+        [yY][eE][sS]|[yY]) ;;
+        *) echo "已取消"; exit 0 ;;
+    esac
+fi
+
+# 11. 执行扩容
+echo ""
+echo "正在扩容 $(fmt "$CUR_SIZE") -> $(fmt "$PART_SIZE") ..."
+if $RESIZE2FS "$ACTUAL_DEV"; then
+    echo ""
+    echo -e "${GREEN}[扩容成功]${NC}"
+    NEW_BLOCKS=$($TUNE2FS -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block count" | awk '{print $3}')
+    if [ -n "$NEW_BLOCKS" ]; then
+        NEW_SIZE=$((NEW_BLOCKS * BLOCK_SIZE))
+        echo "  新大小: $(fmt "$NEW_SIZE")"
+    fi
+    show_df
+else
+    echo "" >&2
+    echo -e "${RED}[扩容失败] resize2fs 返回非零${NC}" >&2
+    exit 1
+fi
