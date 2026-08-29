@@ -29,6 +29,8 @@ umount mnt
 
 # shrink rootfs to minimum size for fast flashing
 # 开机由 expand-rootfs.start 自动扩成满分区（阈值 95%，日志 /var/log/expand-rootfs.log）
+# tar 解包后 fs 未检查，resize2fs 要求先 e2fsck
+e2fsck -fy rootfs.raw
 resize2fs -M rootfs.raw
 
 # create sparse android images
