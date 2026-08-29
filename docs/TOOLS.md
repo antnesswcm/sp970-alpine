@@ -34,7 +34,7 @@
 | 部署文件到设备 | 本地→设备 | **工具** `dev_deploy.py` | busybox 无 sftp-server 的坑 |
 | 设备状态检查 | 9 项验证 | **工具** `verify_build.py` | 固定检查 + 跨会话一致 |
 | 刷机 | fastboot 8 镜像 | **工具** `flash.py` | 高风险 + NV 保护（写死不刷 partition）|
-| 设备单命令查询 | `sp970-link status` | **临场**（dev_ssh + 命令）| 简单，Agent 直接拼 |
+| 设备状态查询/恢复 | `sp970-link card/status/up`（设备端）+ alpine-tools 薄包装 | **工具** | 状态机 + power-cycle 知识在设备端，主机端只透传 |
 | NV 恢复 | 救命操作 | **工具** `restore_nv.py` | 高代价 + 知识密集 |
 
 ### L2 CI/CD
@@ -73,6 +73,11 @@
 5. **可组合**——输出能喂下一个工具（`flash` 后接 `verify`）
 6. **副作用保护**——刷机/删除类带确认或写死保护（如 `flash.py` 不刷 partition）
 7. **文档化**——工具索引在 `experiments/scripts/README.md`（维护者工作区）
+8. **状态语义正确**——输出能表达"未知/查询失败"与"确认值"的区别（教训：sp970-link v1 把 QMI 查询失败谎报成"卡缺席 absent"，误导恢复动作；v2 引入 `unknown` 态区分。工具的输出语义错误会直接导致消费者做出错误决策）
+
+### 设备端工具（固件内置 `/usr/local/bin/`）
+
+`sp970-link` 是"单一事实源 + 恢复原语"的典范：把 6 个分散状态源（QMI UIM/NAS、MM D-Bus、内核 netdev、sysfs bam-dmux、路由表、外网）收敛成一维状态机（card 4 态 / link 6 态），把知识密集的恢复序列（停 MM→power-cycle→provision→注册→起 MM）固化为幂等 `up`。主机端 alpine-tools 只做薄包装，状态机唯一实现在设备端。设计演进与状态语义见维护者本地 `docs/SP970-sp970-link状态机.md`（不入公开仓）。
 
 ## 5. 现有工具集评估
 
