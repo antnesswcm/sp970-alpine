@@ -1,7 +1,18 @@
 #!/bin/sh
-# sp970-link — SP970 modem link status/control interface (device-side, Alpine v4)
-# Usage: sp970-link {card|status|up}
-# Output: one-line JSON (machine-readable).
+# sp970-link — SP970 modem link status/control interface (device-side, Alpine v5)
+# Usage: sp970-link {card|status [--ping]|detail|netcheck|up [--check]}
+# Output: one-line JSON (machine-readable), except detail (pretty text).
+#
+# v2 优化 (2026-08-30, 第一性原理复盘后):
+#   P2  card 四态: present-ready / present-detected / absent / unknown
+#       unknown = 查询失败(QMI 通道挂死等), 与 "modem 确认无卡" 区分,
+#       不再把"没查到"谎报成 absent (避免误导恢复动作)。
+#   P1  status 与外网 ping 解耦: link_state 只反映 modem 事实;
+#       ping 字段默认 na, status --ping 才探测; 外网连通性归 netcheck。
+#   P3  link 六态: up / activating / no-card / card-no-net / net-down / unknown
+#       activating 表达 MM 过渡期 (注册/使能/冷启动 ~40s 窗口 坑#8)。
+#   P6  BDMUX 路径动态查找, 不硬编码 4080000 (坑#1 remoteproc 编号动态)。
+#   P5  up --check 只读预检, 报告卡/链路/计划动作, 不动系统。
 #
 # Stable parsing (已按实测格式校准):
 #   - mmcli -m any -K   : "key : value" 无 ANSI; 用 sed 取 modem.generic.state 等
@@ -14,10 +25,20 @@
 #         状态锚定 modem.generic.state 排除 power/packet service state。
 
 QMI_DEV=/dev/wwan0qmi0
-BDMUX=/sys/devices/platform/soc/4080000.remoteproc/4080000.remoteproc:bam-dmux/power/runtime_status
 PING_TARGET=223.5.5.5
 SIM_ACT=/etc/local.d/sim-activate.start
 QMI=$(command -v qmicli || echo /usr/bin/qmicli)
+
+# bam-dmux runtime_status: 按 name 动态找 (坑#1), 找不到则为空
+# 实际路径: soc/<remoteproc>/<remoteproc>:bam-dmux (两层)
+find_bdmux() {
+    for d in /sys/devices/platform/soc/*/*bam-dmux*; do
+        [ -d "$d" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+BDMUX=$(find_bdmux)/power/runtime_status
+[ "$BDMUX" = "/power/runtime_status" ] && BDMUX=""
 
 # ---- helpers ----
 # MM 在跑? (pgrep -f 会自匹配 pgrep 自身, 用 grep -v pgrep 排除; 也匹配 supervise-daemon, 即 MM 系统在跑)
@@ -29,7 +50,7 @@ qmi() {
 }
 strip_ansi() { sed 's/.\[[0-9;]*m//g'; }
 
-# ---- card ----
+# ---- card (四态: present-ready/present-detected/absent/unknown) ----
 # 全局: CARD_SLOT1, CARD_USIM, CARD_STATE
 collect_card() {
     out=$(qmi --uim-get-card-status 2>&1 | strip_ansi)
@@ -38,22 +59,31 @@ collect_card() {
         # usim 的 application state: "Application type: usim" 的下一行 (busybox awk 不稳, 用 sed n)
         CARD_USIM=$(echo "$out" | sed -n "/Application type:.*usim/{n;p}" | sed -n "s/.*Application state: '\([a-z-]*\)'.*/\1/p")
         [ -z "$CARD_USIM" ] && CARD_USIM=unknown
-    else
-        # 拔卡后: slot1 = "error: possibly-removed (6)" 等, 非 present
-        CARD_SLOT1=$(echo "$out" | sed -n "s/.*Card state: '\([^']*\)'.*/\1/p" | head -1)
-        [ -z "$CARD_SLOT1" ] && CARD_SLOT1=unknown
-        CARD_USIM=none
-    fi
-    if [ "$CARD_SLOT1" = present ]; then
         if [ "$CARD_USIM" = ready ]; then CARD_STATE=present-ready
         else CARD_STATE=present-detected; fi
     else
-        CARD_STATE=absent
+        CARD_SLOT1=$(echo "$out" | sed -n "s/.*Card state: '\([^']*\)'.*/\1/p" | head -1)
+        CARD_USIM=none
+        if [ -z "$CARD_SLOT1" ]; then
+            # 无 "Card state" 输出 = 查询失败(QMI 通道挂死/未就绪), 不是确认无卡
+            CARD_SLOT1=unknown
+            CARD_STATE=unknown
+        else
+            # modem 明确报告非 present (absent / error: possibly-removed (6) 等)
+            CARD_STATE=absent
+        fi
     fi
 }
 
-# ---- status ----
-# 全局: CARD, MM_RUNNING, MM_STATE, NAS, WWAN_IP, DR, PING_OK, BDMUX_V, LINK, MM_SIGNAL, MM_OP
+# ---- status (link 六态, 不掺外网探测) ----
+# 全局: CARD, MM_RUNNING, MM_STATE, NAS, WWAN_IP, DR, BDMUX_V, LINK, MM_SIGNAL, MM_OP
+# link_state 六态:
+#   up         : MM connected + wwan0 有 IP (数据面建立)
+#   activating : 卡在 + MM 在跑但未 connected (注册/使能/冷启动 ~40s 窗口 坑#8)
+#   no-card    : modem 确认无卡
+#   card-no-net: 卡在但 MM 未跑 (还没拉起)
+#   net-down   : MM 在跑但失败 (failed)
+#   unknown    : 卡状态查询失败, 链路无法判定
 collect_status() {
     collect_card
     CARD=$CARD_STATE
@@ -72,18 +102,25 @@ collect_status() {
     [ -z "$WWAN_IP" ] && WWAN_IP=none
     DR=$(/sbin/ip route 2>/dev/null | grep -m1 'default via.*wwan0' | sed -n 's/.*via \([0-9.]*\).*/\1/p')
     [ -z "$DR" ] && DR=none
-    BDMUX_V=unknown; [ -r "$BDMUX" ] && BDMUX_V=$(cat "$BDMUX" 2>/dev/null)
-    PING_OK=$(/bin/ping -c1 -W1 "$PING_TARGET" 2>/dev/null | grep -q '0% packet loss' && echo yes || echo no)
-    # link_state 优先级 (5 态, 用 "MM 是否在跑" 区分 还没拉起 vs 已down, 无需历史)
+    BDMUX_V=unknown; [ -n "$BDMUX" ] && [ -r "$BDMUX" ] && BDMUX_V=$(cat "$BDMUX" 2>/dev/null)
+    # 链路状态机: 只用 modem 事实 (card/mm/ip), 不掺外网可达性
     if [ "$CARD" = absent ]; then
         LINK=no-card
-    elif [ "$MM_STATE" = connected ] && [ "$WWAN_IP" != none ]; then
-        LINK=up
+    elif [ "$CARD" = unknown ]; then
+        LINK=unknown
     elif [ "$MM_RUNNING" = false ]; then
         LINK=card-no-net
-    else
+    elif [ "$MM_STATE" = connected ] && [ "$WWAN_IP" != none ]; then
+        LINK=up
+    elif [ "$MM_STATE" = failed ]; then
         LINK=net-down
+    else
+        LINK=activating
     fi
+}
+
+ping_once() {
+    /bin/ping -c1 -W1 "$PING_TARGET" 2>/dev/null | grep -q '0% packet loss' && echo yes || echo no
 }
 
 cmd_card() {
@@ -92,13 +129,42 @@ cmd_card() {
 }
 
 cmd_status() {
+    PING_OK=na
+    [ "${1:-}" = --ping ] && PING_OK=$(ping_once)
     collect_status
     printf '{"link_state":"%s","card":"%s","mm_running":%s,"mm_state":"%s","signal":"%s","operator":"%s","nas":"%s","wwan_ip":"%s","default_route":"%s","ping":"%s","bdmux":"%s"}\n' \
         "$LINK" "$CARD" "$MM_RUNNING" "$MM_STATE" "$MM_SIGNAL" "$MM_OP" "$NAS" "$WWAN_IP" "$DR" "$PING_OK" "$BDMUX_V"
 }
 
+cmd_detail() {
+    collect_status
+    echo "=== SP970 link detail ==="
+    echo "card   : $CARD  (slot1=$CARD_SLOT1 usim=$CARD_USIM)"
+    echo "link   : $LINK"
+    echo "mm     : running=$MM_RUNNING state=$MM_STATE"
+    echo "signal : ${MM_SIGNAL:-na}   operator: ${MM_OP:-na}"
+    echo "nas    : $NAS"
+    echo "wwan0  : ip=$WWAN_IP default_route=$DR"
+    echo "bdmux  : $BDMUX_V"
+}
+
+cmd_netcheck() {
+    echo "ping $PING_TARGET : $(ping_once)"
+    echo "ping baidu.com : $(/bin/ping -c1 -W1 baidu.com 2>/dev/null | grep -q '0% packet loss' && echo yes || echo no)"
+}
+
 cmd_up() {
     t0=$(date +%s)
+    if [ "${1:-}" = --check ]; then
+        # 只读预检: 报告当前状态 + 若执行 up 的计划动作, 不动系统
+        collect_status
+        if [ "$CARD" = no-card ] || [ "$CARD" = unknown ]; then PLAN=powercycle+sim-activate
+        elif [ "$LINK" = up ]; then PLAN=noop
+        else PLAN=sim-activate; fi
+        printf '{"check":true,"card":"%s","link_state":"%s","mm_state":"%s","plan":"%s"}\n' \
+            "$CARD" "$LINK" "$MM_STATE" "$PLAN"
+        return 0
+    fi
     # 1. 停 MM (干净, 让 sim-activate 的 -d 不争用)
     sudo -n rc-service modemmanager stop >/dev/null 2>&1
     sudo -n pkill -9 -f '/usr/sbin/ModemManager' >/dev/null 2>&1
@@ -127,8 +193,10 @@ cmd_up() {
 }
 
 case "${1:-}" in
-    card)   cmd_card ;;
-    status) cmd_status ;;
-    up)     cmd_up ;;
-    *) echo "usage: $0 {card|status|up}" >&2; exit 2 ;;
+    card)      cmd_card ;;
+    status)    cmd_status "$2" ;;
+    detail)    cmd_detail ;;
+    netcheck)  cmd_netcheck ;;
+    up)        cmd_up "$2" ;;
+    *) echo "usage: $0 {card|status [--ping]|detail|netcheck|up [--check]}" >&2; exit 2 ;;
 esac
