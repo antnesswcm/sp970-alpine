@@ -3,12 +3,22 @@
 # Usage: sp970-at <AT 命令> [超时秒]
 #
 # 背景: MM 的 Modem.Command 需 debug 模式(被拒), qmicli AT 透传也受限;
-#       microcom 直连 /dev/wwan0at0 是设备上可靠的 AT 通道。
-# 坑: SSH 断连会残留 microcom 进程 + /var/lock/LCK..wwan0at0 锁文件,
+#       microcom 直连 AT 端口是设备上可靠的 AT 通道。
+# 坑: SSH 断连会残留 microcom 进程 + /var/lock/LCK..wwan0atX 锁文件,
 #     脚本自动清理 (进程 pkill, 锁文件移动而非删除, 遵守项目铁律)。
-# 固件 AT 面窄: 仅 AT/CPMS/CSMS/CMGL/CMGF/CFUN/CGMM/CGMI 等基础命令可用。
+# 端口: 动态检测 /dev/wwan0at0 优先, at1 兜底 (实验/重枚举后 at0 可能消失)。
+# 固件 AT 面窄: 仅 AT/CPMS/CSMS/CMGL/CMGF/CSCA/CFUN/CGMM/CGMI 等基础命令可用。
 
-AT_DEV=/dev/wwan0at0
+# 动态检测 AT 端口 (at0 → at1 兜底)
+AT_DEV=""
+for d in /dev/wwan0at0 /dev/wwan0at1; do
+    [ -c "$d" ] && { AT_DEV="$d"; break; }
+done
+if [ -z "$AT_DEV" ]; then
+    echo "no AT port found" >&2
+    exit 1
+fi
+
 CMD=${1:-AT}
 TIMEOUT=${2:-3}
 LOCK=/var/lock/LCK..$(basename "$AT_DEV")
