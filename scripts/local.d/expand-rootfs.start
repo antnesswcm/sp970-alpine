@@ -1,34 +1,42 @@
 #!/bin/sh
-# expand-rootfs.start - 开机自动扩容 rootfs（压缩镜像 -> 满分区）
+# expand-rootfs.start - 开机扩容 rootfs：仅在"初次刷机启动"时尝试一次
 #
 # 背景:
 #   - 所有镜像都收缩到 ~200MB (resize2fs -M)，快刷
 #   - 分区实际大小 ~3.47GB (mmcblk0p14)
-#   - 开机自动扩容到分区大小，免手动跑 sp970-expand-rootfs
+#   - 首次启动自动扩容到分区大小
+#
+# 与"首次启动标记"的关系（标记是系统级，非扩容专属）:
+#   - 标记文件 /etc/first-boot.done 表示"首次刷机后的开机链路已完整执行过"，
+#     由链路末尾的 zz-first-boot-done.start 统一维护。本脚本对标记只读不写：
+#       · 标记存在 → 直接退出，不再主动扩容（用户缩容后标记仍在，也不"傻扩"）
+#       · 标记不存在 → 本次视为首次启动，执行判断 + 扩容
+#   - 扩容的成败只记录到 /var/log/expand-rootfs.log，不写入标记文件；
+#     只要链路完整走完，末尾标记脚本仍会写标记 → 之后不再重试（含失败场景）
+#   - 重新刷机覆盖 rootfs 分区 → 标记消失 → 视为新的首次启动
+#   - 扩容失败不阻塞开机
 #
 # 依赖:
 #   - /usr/sbin/resize2fs (e2fsprogs-extra)
 #   - /usr/sbin/tune2fs (e2fsprogs-extra)
 #
-# 日志:
-#   - /var/log/expand-rootfs.log
-#
-# 条件:
-#   - 仅当 CUR_SIZE < PART_SIZE*95% 时执行（避免重复扩容）
-#   - 扩容失败不阻塞开机
-#
-# 注意:
-#   - 不用 df 使用率判断——压缩镜像 Use% ~95% 会被 90% 阈值误拦，永远不扩容
-#   - busybox 无 findmnt，改用 /proc/mounts 解析
+# 日志: /var/log/expand-rootfs.log
+# 标记: /etc/first-boot.done（只读；写由 zz-first-boot-done.start 负责）
 
 # 确保 /usr/sbin 在 PATH 中
 export PATH=/usr/sbin:/usr/bin:/bin:$PATH
 
 LOG="/var/log/expand-rootfs.log"
+MARKER="/etc/first-boot.done"
 
-# 检查 resize2fs
+# 首次启动链路已完成（标记存在）→ 不再主动扩容；用户缩容后标记仍在，也不扩
+if [ -e "$MARKER" ]; then
+    exit 0
+fi
+
+# 检查 resize2fs —— 缺失只记日志，不阻塞开机（标记由链路末尾统一写）
 if [ ! -x /usr/sbin/resize2fs ]; then
-    echo "$(date): resize2fs not found, skipping" >> "$LOG"
+    echo "$(date): resize2fs not found, skip expand" >> "$LOG"
     exit 0
 fi
 
@@ -56,7 +64,7 @@ if [ -z "$PART_SIZE" ]; then
 fi
 
 if [ -z "$PART_SIZE" ]; then
-    echo "$(date): cannot get partition size, skipping" >> "$LOG"
+    echo "$(date): cannot get partition size, skip expand" >> "$LOG"
     exit 0
 fi
 
@@ -65,20 +73,20 @@ CUR_BLOCKS=$(/usr/sbin/tune2fs -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block co
 BLOCK_SIZE=$(/usr/sbin/tune2fs -l "$ACTUAL_DEV" 2>/dev/null | grep -E "^Block size" | awk '{print $3}')
 
 if [ -z "$CUR_BLOCKS" ] || [ -z "$BLOCK_SIZE" ]; then
-    echo "$(date): cannot get filesystem size, skipping" >> "$LOG"
+    echo "$(date): cannot get filesystem size, skip expand" >> "$LOG"
     exit 0
 fi
 
 CUR_SIZE=$((CUR_BLOCKS * BLOCK_SIZE))
 
-# 检查是否需要扩容（当前大小 < 分区大小 * 95%）
+# 无需扩容（当前大小 >= 分区大小 * 95%）→ 记日志跳过，标记仍由链路末尾写
 THRESHOLD=$((PART_SIZE * 95 / 100))
 if [ "$CUR_SIZE" -ge "$THRESHOLD" ]; then
-    # 已经接近分区大小，跳过
+    echo "$(date): already at partition size, skip expand" >> "$LOG"
     exit 0
 fi
 
-# 执行扩容
+# 执行扩容（成败只进日志，不写标记）
 echo "$(date): expanding rootfs from $(awk -v b="$CUR_SIZE" 'BEGIN{printf "%.0fMB", b/1048576}') to $(awk -v b="$PART_SIZE" 'BEGIN{printf "%.0fMB", b/1048576}')" >> "$LOG"
 
 if /usr/sbin/resize2fs "$ACTUAL_DEV" 2>>"$LOG"; then
@@ -86,3 +94,5 @@ if /usr/sbin/resize2fs "$ACTUAL_DEV" 2>>"$LOG"; then
 else
     echo "$(date): expand FAILED" >> "$LOG"
 fi
+
+exit 0

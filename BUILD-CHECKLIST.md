@@ -22,6 +22,11 @@
 - [ ] `alpine_rootfs.sh` 中包列表完整
 - [ ] 新工具需要的包已添加（如 `e2fsprogs-extra`）
 
+### 5. 首次启动标记机制（`zz-first-boot-done.start`）
+- [ ] 必须以 `zz-` 前缀命名，字母序排在所有 local.d 脚本**最后**（链路末尾才写标记）
+- [ ] 职责边界：链路末尾写 `/etc/first-boot.done`，**只标记不评判**（各功能成败只进各自日志），幂等（标记已存在即退出）
+- [ ] 消费约定：其他脚本判断"是否首次启动"只读标记存在性，**不得自行写标记**（唯一例外：手动 `sp970-expand-rootfs` 扩容成功后写）
+
 ## 构建后 Checklist
 
 ### 1. 构建产物
@@ -51,6 +56,7 @@
 - [ ] `sp970-link` 可执行
 - [ ] `sp970-expand-rootfs -y` 可执行
 - [ ] 磁盘空间正常（已扩容到分区大小，`sp970-expand-rootfs --check` 确认）
+- [ ] 首次启动标记已写（`cat /etc/first-boot.done`，链路末尾 `zz-first-boot-done.start` 已执行）
 
 ### 4. 日志
 - [ ] 无致命错误（`dmesg | grep -i error`）

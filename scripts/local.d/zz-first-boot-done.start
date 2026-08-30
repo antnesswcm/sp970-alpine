@@ -1,0 +1,40 @@
+#!/bin/sh
+# zz-first-boot-done.start - 系统级"首次刷机启动已完成"标记维护脚本
+#
+# 职责（唯一）：在开机 local.d 链路末尾写入标记 /etc/first-boot.done，
+# 为全系统提供"是否已过首次刷机启动"的权威判定依据。
+#
+# 职责边界:
+#   - 只标记、不评判：不读取/不依赖/不记录任何其他脚本的执行结果，
+#     各功能的成败只进各自日志（如 /var/log/expand-rootfs.log）
+#   - 写入时机：整条 local.d 链路（expand-rootfs -> led-daemon -> nat
+#     -> sim-activate -> zz-first-boot-done）完整执行到本脚本、
+#     且标记不存在时，才写入
+#   - 幂等：标记已存在（无论由谁写入）→ 直接退出，不重写、不覆盖
+#
+# 标记消费约定: 需要判断"是否首次刷机启动"的功能直接检查
+#   /etc/first-boot.done 是否存在（存在 = 已过首次启动，后续不再执行
+#   首次启动专属逻辑）。当前消费者: expand-rootfs.start（标记存在则不再自动扩容）。
+#
+# 写入者约定:
+#   - 开机链路中本脚本是唯一写入者
+#   - 链路外唯一例外: 手动工具 sp970-expand-rootfs 扩容成功后写入
+#     （用户主动操作，立即定格，不等下次开机链路）
+#
+# 生命周期: 标记位于 rootfs 分区（/etc），重新刷机覆盖 rootfs 后被清除，
+#   系统视为新的首次启动。
+#
+# 标记文件: /etc/first-boot.done（内容: first-boot done <时间>）
+# 日志: /var/log/first-boot.log
+
+MARKER="/etc/first-boot.done"
+LOG="/var/log/first-boot.log"
+
+# 已标记 → 不动
+if [ -e "$MARKER" ]; then
+    exit 0
+fi
+
+echo "first-boot done $(date)" > "$MARKER"
+echo "$(date): first boot chain completed, marker written" >> "$LOG"
+exit 0

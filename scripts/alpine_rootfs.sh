@@ -122,7 +122,8 @@ rc-update add local default
 # heredocs and corrupt the scripts. Using ${CHROOT} paths directly avoids that.
 
 # NOTE: rootfs sizing done at build time (build_images.sh resize2fs -M shrink to ~200MB),
-# 开机由 expand-rootfs.start 自动扩成满分区（阈值 95%，日志 /var/log/expand-rootfs.log）。
+# 开机由 expand-rootfs.start 自动扩成满分区（仅"初次刷机启动"一次，标记 /etc/first-boot.done
+# 由链路末尾 zz-first-boot-done.start 统一写入；日志 /var/log/expand-rootfs.log）。
 mkdir -p ${CHROOT}/etc/local.d
 
 # SIM activation (Plan B) + modem bring-up + NAT.
@@ -166,12 +167,17 @@ chmod +x ${CHROOT}/etc/local.d/nat.start
 cp scripts/local.d/led-daemon.start ${CHROOT}/etc/local.d/led-daemon.start
 chmod +x ${CHROOT}/etc/local.d/led-daemon.start
 
-# Rootfs 开机自动扩容（压缩镜像 -> 满分区）
-# local.d 按字母序执行：expand-rootfs < led-daemon < nat < sim-activate
-# 所以这个最先跑。压缩镜像 (~200MB) 开机自动扩成满分区 (~3.47GB)。
-# 已扩容时 no-op 跳过（CUR_SIZE >= PART_SIZE*95%）。日志：/var/log/expand-rootfs.log
+# Rootfs 开机自动扩容（压缩镜像 -> 满分区）：仅"初次刷机启动"尝试一次
+# local.d 按字母序执行：expand-rootfs < led-daemon < nat < sim-activate < zz-first-boot-done
+# expand-rootfs.start 对标记 /etc/first-boot.done 只读不写（存在即跳过），扩容成败只写日志；
+# 标记是系统级"首次启动已完成"标志，由链路末尾 zz-first-boot-done.start 唯一写入：
+# 整条链路完整走完才写（含扩容失败场景 -> 之后不再重试）；链路中断则不写 -> 下次重试。
+# 日志：/var/log/expand-rootfs.log
 cp scripts/local.d/expand-rootfs.start ${CHROOT}/etc/local.d/expand-rootfs.start
 chmod +x ${CHROOT}/etc/local.d/expand-rootfs.start
+# 首次启动标记脚本（系统级，链路末尾统一写入 /etc/first-boot.done）
+cp scripts/local.d/zz-first-boot-done.start ${CHROOT}/etc/local.d/zz-first-boot-done.start
+chmod +x ${CHROOT}/etc/local.d/zz-first-boot-done.start
 
 echo 'user ALL=(ALL:ALL) NOPASSWD: ALL' > ${CHROOT}/etc/sudoers.d/user
 
@@ -286,6 +292,8 @@ check() {
 check "etc/local.d/sim-activate.start"
 check "etc/local.d/nat.start"
 check "etc/local.d/led-daemon.start"
+check "etc/local.d/expand-rootfs.start"
+check "etc/local.d/zz-first-boot-done.start"
 check "usr/local/bin/sp970-link"
 # usr/bin/sp970-link is a symlink to /usr/local/bin/sp970-link.
 # -e follows symlinks and resolves the absolute target on the BUILD HOST
@@ -306,7 +314,7 @@ check "etc/openstick-version"
 check "etc/openstick-changelog.md"
 
 # Verfiy local.d scripts are not empty (heredoc truncation check)
-for f in sim-activate.start nat.start led-daemon.start; do
+for f in sim-activate.start nat.start led-daemon.start expand-rootfs.start zz-first-boot-done.start; do
     fpath="${CHROOT}/etc/local.d/$f"
     if [ -s "$fpath" ]; then
         # check at least 5 lines (not a truncated heredoc)
@@ -345,7 +353,7 @@ check_exec "usr/local/bin/sp970-link"
 check_exec "usr/local/bin/sp970-expand-rootfs"
 
 # /etc/local.d startup scripts (called by local init)
-for f in expand-rootfs.start sim-activate.start nat.start led-daemon.start; do
+for f in expand-rootfs.start sim-activate.start nat.start led-daemon.start zz-first-boot-done.start; do
     check_exec "etc/local.d/${f}"
 done
 

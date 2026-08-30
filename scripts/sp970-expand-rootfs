@@ -22,6 +22,9 @@
 # 注意:
 #   - /proc/partitions 的 #blocks 是 1024 进制（非 512）
 #   - busybox 无 findmnt，改用 /proc/mounts 解析
+#   - 与开机脚本 expand-rootfs.start 协作：手动工具不受标记限制（用户主动操作，
+#     随时可扩）；但扩容成功后写 /etc/first-boot.done 立即定格，
+#     开机脚本不再自动扩容（用户随后手动缩容也不会被开机"傻扩"）
 
 set -u
 
@@ -189,6 +192,10 @@ if $RESIZE2FS "$ACTUAL_DEV"; then
         NEW_SIZE=$((NEW_BLOCKS * BLOCK_SIZE))
         echo "  新大小: $(fmt "$NEW_SIZE")"
     fi
+    # 写首次启动标记（用户主动操作，立即定格）：
+    # 开机脚本 expand-rootfs.start 此后不再自动扩容，用户随后缩容也不会被"傻扩"
+    echo "first-boot done $(date)" > /etc/first-boot.done
+    echo "  [标记] 已写 /etc/first-boot.done，开机自动扩容已禁用"
     show_df
 else
     echo "" >&2
