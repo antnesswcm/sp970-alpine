@@ -1,0 +1,24 @@
+#!/bin/sh
+# sp970-at — 通过 AT 直连端口发送 AT 命令 (device-side)
+# Usage: sp970-at <AT 命令> [超时秒]
+#
+# 背景: MM 的 Modem.Command 需 debug 模式(被拒), qmicli AT 透传也受限;
+#       microcom 直连 /dev/wwan0at0 是设备上可靠的 AT 通道。
+# 坑: SSH 断连会残留 microcom 进程 + /var/lock/LCK..wwan0at0 锁文件,
+#     脚本自动清理 (进程 pkill, 锁文件移动而非删除, 遵守项目铁律)。
+# 固件 AT 面窄: 仅 AT/CPMS/CSMS/CMGL/CMGF/CFUN/CGMM/CGMI 等基础命令可用。
+
+AT_DEV=/dev/wwan0at0
+CMD=${1:-AT}
+TIMEOUT=${2:-3}
+LOCK=/var/lock/LCK..$(basename "$AT_DEV")
+
+# 清理残留 microcom 进程和锁文件
+sudo -n pkill -9 -x microcom 2>/dev/null
+sleep 1
+if [ -f "$LOCK" ]; then
+    sudo -n mv "$LOCK" "/tmp/$(basename "$LOCK").$(date +%s)" 2>/dev/null
+fi
+
+# 发送 AT (自动补 CRLF)
+printf '%s\r\n' "$CMD" | sudo -n microcom -t "$TIMEOUT" "$AT_DEV" 2>&1
