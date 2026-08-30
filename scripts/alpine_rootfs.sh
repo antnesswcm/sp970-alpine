@@ -258,6 +258,12 @@ cp scripts/sp970-expand-rootfs ${CHROOT}/usr/local/bin/sp970-expand-rootfs
 chmod +x ${CHROOT}/usr/local/bin/sp970-expand-rootfs
 ln -sf /usr/local/bin/sp970-expand-rootfs ${CHROOT}/usr/bin/sp970-expand-rootfs
 
+# sp970-at: AT 直连通道工具（microcom 封装，自动清理 microcom 残留 + 锁文件）
+# 与 sp970-link 同模式：/usr/local/bin (canonical) + /usr/bin symlink。
+cp scripts/sp970-at ${CHROOT}/usr/local/bin/sp970-at
+chmod +x ${CHROOT}/usr/local/bin/sp970-at
+ln -sf /usr/local/bin/sp970-at ${CHROOT}/usr/bin/sp970-at
+
 # write firmware version identifier for quick boot-time identification
 # /etc/openstick-version: "v4.0.0 (2026-08-25, commit ff25894c1a2b...)"  [full hash for exact verification]
 # /etc/openstick-changelog.md: 随固件打包的变更日志
@@ -295,6 +301,7 @@ check "etc/local.d/led-daemon.start"
 check "etc/local.d/expand-rootfs.start"
 check "etc/local.d/zz-first-boot-done.start"
 check "usr/local/bin/sp970-link"
+check "usr/local/bin/sp970-at"
 # usr/bin/sp970-link is a symlink to /usr/local/bin/sp970-link.
 # -e follows symlinks and resolves the absolute target on the BUILD HOST
 # (not inside the chroot) → false MISSING. Use -L to check the link itself.
@@ -302,6 +309,12 @@ if [ -L "${CHROOT}/usr/bin/sp970-link" ]; then
     echo "  ✅ usr/bin/sp970-link (symlink)"
 else
     echo "  ❌ usr/bin/sp970-link — symlink MISSING!"
+    errors=$((errors+1))
+fi
+if [ -L "${CHROOT}/usr/bin/sp970-at" ]; then
+    echo "  ✅ usr/bin/sp970-at (symlink)"
+else
+    echo "  ❌ usr/bin/sp970-at — symlink MISSING!"
     errors=$((errors+1))
 fi
 check "boot/vmlinuz"
@@ -351,6 +364,7 @@ check_exec() {
 check_exec "usr/local/bin/setup_ncm_gadget.sh"
 check_exec "usr/local/bin/sp970-link"
 check_exec "usr/local/bin/sp970-expand-rootfs"
+check_exec "usr/local/bin/sp970-at"
 
 # /etc/local.d startup scripts (called by local init)
 for f in expand-rootfs.start sim-activate.start nat.start led-daemon.start zz-first-boot-done.start; do
